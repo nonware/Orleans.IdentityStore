@@ -156,16 +156,21 @@ namespace Orleans.IdentityStore.Grains
         private readonly IPersistentState<IdentityUserGrainState<TUser, TRole>> _data;
         private readonly IdentityErrorDescriber _errorDescriber = new IdentityErrorDescriber();
         private readonly ILookupNormalizer _normalizer;
+        private readonly IGrainFactory _grainFactory;
         private Guid _id;
 
         public IdentityUserGrain(
             ILookupNormalizer normalizer,
             [PersistentState("IdentityUser", OrleansIdentityConstants.OrleansStorageProvider)]
-        IPersistentState<IdentityUserGrainState<TUser, TRole>> data)
+        IPersistentState<IdentityUserGrainState<TUser, TRole>> data,
+            IGrainFactory grainFactory)
         {
             _data = data;
             _normalizer = normalizer;
+            _grainFactory = grainFactory;
         }
+
+        public IGrainContext GrainContext => throw new NotImplementedException();
 
         private bool Exists => _data.State?.User != null;
 
@@ -180,7 +185,7 @@ namespace Orleans.IdentityStore.Grains
                     if (!_data.State.Claims.Any(x => x.ClaimType == c.ClaimType && x.ClaimValue == c.ClaimValue))
                     {
                         _data.State.Claims.Add(c);
-                        tasks.Add(GrainFactory.GetGrain(c).AddUserId(_id));
+                        tasks.Add(_grainFactory.GetGrain(c).AddUserId(_id));
                     }
                 }
                 tasks.Add(_data.WriteStateAsync());
@@ -195,7 +200,7 @@ namespace Orleans.IdentityStore.Grains
             if (Exists && login != null)
             {
                 _data.State.Logins.Add(login);
-                await GrainFactory.AddOrUpdateToLookup(login.LoginProvider, login.ProviderKey, _id);
+                await _grainFactory.AddOrUpdateToLookup(login.LoginProvider, login.ProviderKey, _id);
                 await _data.WriteStateAsync();
             }
         }
@@ -216,7 +221,7 @@ namespace Orleans.IdentityStore.Grains
             if (Exists && _data.State.Roles.Add(roleId))
             {
                 return Task.WhenAll(
-                    GrainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(roleId).AddUser(_id),
+                    _grainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(roleId).AddUser(_id),
                     _data.WriteStateAsync());
             }
 
@@ -241,14 +246,14 @@ namespace Orleans.IdentityStore.Grains
             user.NormalizedEmail = _normalizer.NormalizeEmail(user.Email);
             user.NormalizedUserName = _normalizer.NormalizeName(user.UserName);
 
-            if (!await GrainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id))
+            if (!await _grainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id))
             {
                 return IdentityResult.Failed(_errorDescriber.DuplicateEmail(user.Email));
             }
 
-            if (!await GrainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.UsernameLookup, user.NormalizedUserName, _id))
+            if (!await _grainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.UsernameLookup, user.NormalizedUserName, _id))
             {
-                await GrainFactory.SafeRemoveFromLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id);
+                await _grainFactory.SafeRemoveFromLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id);
                 return IdentityResult.Failed(_errorDescriber.DuplicateUserName(user.UserName));
             }
 
@@ -264,9 +269,9 @@ namespace Orleans.IdentityStore.Grains
             if (_data.State.User == null)
                 return IdentityResult.Failed(_errorDescriber.DefaultError());
 
-            await GrainFactory.RemoveFromLookup(OrleansIdentityConstants.EmailLookup, _data.State.User.NormalizedEmail);
-            await GrainFactory.RemoveFromLookup(OrleansIdentityConstants.UsernameLookup, _data.State.User.NormalizedUserName);
-            await Task.WhenAll(_data.State.Roles.Select(r => GrainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(r).RemoveUser(_id)));
+            await _grainFactory.RemoveFromLookup(OrleansIdentityConstants.EmailLookup, _data.State.User.NormalizedEmail);
+            await _grainFactory.RemoveFromLookup(OrleansIdentityConstants.UsernameLookup, _data.State.User.NormalizedUserName);
+            await Task.WhenAll(_data.State.Roles.Select(r => _grainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(r).RemoveUser(_id)));
             await _data.ClearStateAsync();
 
             return IdentityResult.Success;
@@ -312,7 +317,7 @@ namespace Orleans.IdentityStore.Grains
         {
             if (Exists)
             {
-                return (await Task.WhenAll(_data.State.Roles.Select(r => GrainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(r).Get())))
+                return (await Task.WhenAll(_data.State.Roles.Select(r => _grainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(r).Get())))
                     .Select(r => r.Name)
                     .ToList();
             }
@@ -330,7 +335,7 @@ namespace Orleans.IdentityStore.Grains
             return Task.FromResult<IdentityUserToken<Guid>>(null);
         }
 
-        public override Task OnActivateAsync()
+        public Task OnActivateAsync()
         {
             _id = this.GetPrimaryKey();
             return Task.CompletedTask;
@@ -346,7 +351,7 @@ namespace Orleans.IdentityStore.Grains
                 {
                     writeRequired = true;
                     _data.State.Claims.Remove(m);
-                    tasks.Add(GrainFactory.GetGrain(m).RemoveUserId(_id));
+                    tasks.Add(_grainFactory.GetGrain(m).RemoveUserId(_id));
                 }
             }
 
@@ -365,7 +370,7 @@ namespace Orleans.IdentityStore.Grains
                 {
                     _data.State.Logins.Remove(loginToRemove);
 
-                    await GrainFactory.RemoveFromLookup(loginProvider, providerKey);
+                    await _grainFactory.RemoveFromLookup(loginProvider, providerKey);
                     await _data.WriteStateAsync();
                 }
             }
@@ -377,7 +382,7 @@ namespace Orleans.IdentityStore.Grains
             {
                 if (updateRoleGrain)
                 {
-                    await GrainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(id).RemoveUser(_id);
+                    await _grainFactory.GetGrain<IIdentityRoleGrain<TUser, TRole>>(id).RemoveUser(_id);
                 }
 
                 await _data.WriteStateAsync();
@@ -409,10 +414,10 @@ namespace Orleans.IdentityStore.Grains
                 var tasks = new List<Task>();
                 foreach (var c in matchedClaims)
                 {
-                    tasks.Add(GrainFactory.GetGrain(c).RemoveUserId(_id));
+                    tasks.Add(_grainFactory.GetGrain(c).RemoveUserId(_id));
                     c.ClaimValue = newClaim.Value;
                     c.ClaimType = newClaim.Type;
-                    tasks.Add(GrainFactory.GetGrain(c).AddUserId(_id));
+                    tasks.Add(_grainFactory.GetGrain(c).AddUserId(_id));
                 }
 
                 tasks.Add(_data.WriteStateAsync());
@@ -436,17 +441,17 @@ namespace Orleans.IdentityStore.Grains
             var newEmail = _normalizer.NormalizeEmail(user.Email);
             var newUsername = _normalizer.NormalizeName(user.UserName);
 
-            if (newEmail != _data.State.User.NormalizedEmail && !await GrainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.EmailLookup, newEmail, _id))
+            if (newEmail != _data.State.User.NormalizedEmail && !await _grainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.EmailLookup, newEmail, _id))
             {
                 return IdentityResult.Failed(_errorDescriber.DuplicateEmail(newEmail));
             }
 
-            if (newUsername != _data.State.User.NormalizedUserName && !await GrainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.UsernameLookup, newUsername, _id))
+            if (newUsername != _data.State.User.NormalizedUserName && !await _grainFactory.AddOrUpdateToLookup(OrleansIdentityConstants.UsernameLookup, newUsername, _id))
             {
                 // if email changed, then undo that change
                 if (newEmail != _data.State.User.NormalizedEmail)
                 {
-                    await GrainFactory.SafeRemoveFromLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id);
+                    await _grainFactory.SafeRemoveFromLookup(OrleansIdentityConstants.EmailLookup, user.NormalizedEmail, _id);
                 }
 
                 return IdentityResult.Failed(_errorDescriber.DuplicateUserName(user.UserName));
@@ -455,12 +460,12 @@ namespace Orleans.IdentityStore.Grains
             // Remove old values
             if (newEmail != _data.State.User.NormalizedEmail)
             {
-                await GrainFactory.RemoveFromLookup(OrleansIdentityConstants.EmailLookup, _data.State.User.NormalizedEmail);
+                await _grainFactory.RemoveFromLookup(OrleansIdentityConstants.EmailLookup, _data.State.User.NormalizedEmail);
             }
 
             if (newUsername != _data.State.User.NormalizedUserName)
             {
-                await GrainFactory.RemoveFromLookup(OrleansIdentityConstants.UsernameLookup, _data.State.User.NormalizedUserName);
+                await _grainFactory.RemoveFromLookup(OrleansIdentityConstants.UsernameLookup, _data.State.User.NormalizedUserName);
             }
 
             _data.State.User = user;
@@ -471,14 +476,20 @@ namespace Orleans.IdentityStore.Grains
         }
     }
 
+    [GenerateSerializer]
     internal class IdentityUserGrainState<TUser, TRole>
             where TUser : IdentityUser<Guid>, new()
         where TRole : IdentityRole<Guid>, new()
     {
+        [Id(0)]
         public List<IdentityUserClaim<Guid>> Claims { get; set; } = new List<IdentityUserClaim<Guid>>();
+        [Id(1)]
         public List<IdentityUserLogin<Guid>> Logins { get; set; } = new List<IdentityUserLogin<Guid>>();
+        [Id(2)]
         public HashSet<Guid> Roles { get; set; } = new HashSet<Guid>();
+        [Id(3)]
         public List<IdentityUserToken<Guid>> Tokens { get; set; } = new List<IdentityUserToken<Guid>>();
+        [Id(4)]
         public TUser User { get; set; }
     }
 }
